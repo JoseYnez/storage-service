@@ -1,0 +1,180 @@
+# =============================================================================
+# storage-service — peticiones de prueba (VS Code REST Client / IntelliJ HTTP)
+# =============================================================================
+# Requiere la extension "REST Client" (humao.rest-client) en VS Code.
+# Ajusta @apiKey al valor de API_KEY de tu .env.
+# Cada bloque separado por ### es una peticion ejecutable ("Send Request").
+#
+# Las subidas multipart usan la sintaxis "< ./ruta" para adjuntar un archivo
+# del disco: crea uno de prueba o cambia la ruta por uno que exista.
+# =============================================================================
+
+@host = http://localhost:3010
+@apiKey = sk_reemplazar_por_una_key_generada
+
+
+### Health — no requiere api key
+GET {{host}}/health
+
+
+### Buckets disponibles y sus limites
+GET {{host}}/v1/buckets
+X-Api-Key: {{apiKey}}
+
+
+### Subir en JSON (base64) — minimo: filename + contenido
+# @name uploadJson
+POST {{host}}/v1/files
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{
+  "filename": "nota.txt",
+  "content_base64": "SG9sYSBkZXNkZSBzdG9yYWdlLXNlcnZpY2UK"
+}
+
+
+### Subir en JSON completo (ruta, bucket, tipo y metadata)
+POST {{host}}/v1/files
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{
+  "filename": "factura-4711.pdf",
+  "path": "2026/08/factura-4711.pdf",
+  "bucket_code": "invoices",
+  "content_type": "application/pdf",
+  "content_base64": "JVBERi0xLjQKJSVFT0YK",
+  "metadata": { "order_id": "4711", "tipo": "factura" }
+}
+
+
+### Subir multipart (streaming) — la via para archivos grandes
+# @name uploadMultipart
+POST {{host}}/v1/files
+X-Api-Key: {{apiKey}}
+Content-Type: multipart/form-data; boundary=----storage
+
+------storage
+Content-Disposition: form-data; name="path"
+
+docs/2026/informe.txt
+------storage
+Content-Disposition: form-data; name="metadata"
+
+{"origen":"requests.http"}
+------storage
+Content-Disposition: form-data; name="file"; filename="informe.txt"
+Content-Type: text/plain
+
+< ./package.json
+------storage--
+
+
+### Subir el MISMO contenido a otra ruta -> deduplicated: true
+POST {{host}}/v1/files
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{
+  "filename": "nota-copia.txt",
+  "path": "docs/nota-copia.txt",
+  "content_base64": "SG9sYSBkZXNkZSBzdG9yYWdlLXNlcnZpY2UK"
+}
+
+
+### Metadata por id (usa el id devuelto por la subida JSON)
+GET {{host}}/v1/files/{{uploadJson.response.body.id}}
+X-Api-Key: {{apiKey}}
+
+
+### Metadata por ruta — sin haber guardado el id
+GET {{host}}/v1/files?path=nota.txt
+X-Api-Key: {{apiKey}}
+
+
+### Listado por prefijo, paginado
+GET {{host}}/v1/files?prefix=docs/&limit=20
+X-Api-Key: {{apiKey}}
+
+
+### Descargar con api key
+GET {{host}}/v1/files/{{uploadJson.response.body.id}}/content
+X-Api-Key: {{apiKey}}
+
+
+### Descargar forzando "guardar como"
+GET {{host}}/v1/files/{{uploadJson.response.body.id}}/content?download=1
+X-Api-Key: {{apiKey}}
+
+
+### Emitir un enlace temporal firmado (5 min)
+# @name link
+POST {{host}}/v1/files/{{uploadJson.response.body.id}}/link
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{ "expires_in_sec": 300 }
+
+
+### Descargar por el enlace firmado — SIN api key
+GET {{link.response.body.url}}
+
+
+### Borrado logico -> 204
+DELETE {{host}}/v1/files/{{uploadJson.response.body.id}}
+X-Api-Key: {{apiKey}}
+
+
+# =============================================================================
+# Casos de error esperados
+# =============================================================================
+
+### Sin api key -> 401
+GET {{host}}/v1/files?path=nota.txt
+
+
+### Api key invalida -> 401
+GET {{host}}/v1/buckets
+X-Api-Key: key-invalida
+
+
+### Body invalido: sin contenido -> 400
+POST {{host}}/v1/files
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{ "filename": "vacio.txt" }
+
+
+### Bucket inexistente por code -> 422
+POST {{host}}/v1/files
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{
+  "filename": "x.txt",
+  "bucket_code": "no-existe-este-bucket",
+  "content_base64": "eAo="
+}
+
+
+### MIME fuera de la lista blanca del bucket -> 415
+POST {{host}}/v1/files
+Content-Type: application/json
+X-Api-Key: {{apiKey}}
+
+{
+  "filename": "imagen.png",
+  "content_type": "image/png",
+  "content_base64": "iVBORw0KGgo="
+}
+
+
+### Id inexistente -> 404
+GET {{host}}/v1/files/00000000-0000-7000-8000-000000000000
+X-Api-Key: {{apiKey}}
+
+
+### Enlace con firma alterada -> 403
+GET {{host}}/v1/public/files/00000000-0000-7000-8000-000000000000/content?expires=9999999999&sig=firma-invalida

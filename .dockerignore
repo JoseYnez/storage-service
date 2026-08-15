@@ -1,0 +1,15 @@
+node_modules
+dist
+.env
+.env.*
+.git
+*.log
+# Gestor de paquetes: la imagen usa pnpm (pnpm-lock.yaml).
+package-lock.json
+coverage
+.vscode
+# Herramientas de administracion / pruebas: no van en la imagen de runtime.
+scripts
+requests.http
+# Contenido subido en desarrollo: jamas al contexto del build.
+data
