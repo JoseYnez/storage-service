@@ -11,8 +11,16 @@ import { pool, type PoolClient } from './pool.js';
 export interface AuditContext {
   /** Endpoint o tarea que origina el DML — queda en audit.action. */
   action: string;
-  /** Override del usuario de servicio, si aplica. */
+  /**
+   * Usuario real de la operacion (claim sub del access token). Sin definir,
+   * cae al usuario de servicio: es el caso de las API keys y del worker.
+   */
   userId?: string;
+  /**
+   * Sesion del usuario (claim sid) — queda en audit.event_log.app_session_id
+   * para atribuir cada DML a una sesion concreta. Solo existe con access token.
+   */
+  sessionId?: string;
 }
 
 /**
@@ -31,12 +39,20 @@ export async function withAuditContext<T>(
 
     // set_config(key, value, is_local=true): valido solo dentro de esta
     // transaccion. Parametrizado para no concatenar valores en el SQL.
+    // user_session vacio = sin sesion: el NULLIF(..., '') del trigger de
+    // auditoria lo convierte en NULL.
     await client.query(
       `SELECT
-         set_config('audit.user_id',  $1, true),
-         set_config('audit.app_name', $2, true),
-         set_config('audit.action',   $3, true)`,
-      [ctx.userId ?? config.SERVICE_USER_ID, config.AUDIT_APP_NAME, ctx.action],
+         set_config('audit.user_id',      $1, true),
+         set_config('audit.app_name',     $2, true),
+         set_config('audit.action',       $3, true),
+         set_config('audit.user_session', $4, true)`,
+      [
+        ctx.userId ?? config.SERVICE_USER_ID,
+        config.AUDIT_APP_NAME,
+        ctx.action,
+        ctx.sessionId ?? '',
+      ],
     );
 
     const result = await fn(client);

@@ -22,12 +22,20 @@ const schema = z.object({
   API_ENABLED: boolFromEnv.default('true'),
   WORKER_ENABLED: boolFromEnv.default('true'),
 
+  // Detras de un reverse proxy, true hace que req.ip respete X-Forwarded-For
+  // (necesario para que el rate limit cuente por cliente real y no por proxy).
+  // Expuesto directo a internet debe quedar en false: el header seria forjable.
+  TRUST_PROXY: boolFromEnv.default('false'),
+
+  // ----- Rate limiting (en memoria, por IP) ---------------------------------
+  // Primera linea contra abuso. En multi-instancia cada proceso cuenta por
+  // separado; para un limite global compartido hace falta un store externo.
+  RATE_LIMIT_DISABLED: boolFromEnv.default('false'),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(600),
+  RATE_LIMIT_WINDOW_SEC: z.coerce.number().int().positive().default(60),
+
   DATABASE_URL: z.string().min(1),
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
-
-  API_KEY: z.string().min(16, 'API_KEY demasiado corta'),
-  API_KEY_CUSTOMER_ID: uuid,
-  API_KEY_APP_ID: uuid,
 
   SERVICE_USER_ID: uuid,
   AUDIT_APP_NAME: z.string().default('storage-service'),
@@ -58,6 +66,30 @@ const schema = z.object({
     .default('http://localhost:3010')
     .transform((u) => u.replace(/\/+$/, '')),
 
+  // ----- Autenticacion por access token de la plataforma (auth_ws) ----------
+  // Base URL de auth_ws (sin barra final). Definirla ENCIENDE la autenticacion
+  // por Bearer JWT: el servicio valida los tokens localmente contra el JWKS de
+  // /auth/.well-known/keys y autoriza contra /auth/sessions/current/permissions.
+  // Sin definir, el servicio solo acepta X-Api-Key (comportamiento previo).
+  AUTH_WS_BASE_URL: z
+    .string()
+    .url()
+    .transform((u) => u.replace(/\/+$/, ''))
+    .optional(),
+
+  // Lista blanca de origenes CORS separada por comas, para SPAs que llaman a
+  // este servicio directo con el Bearer del usuario. Vacia = sin CORS (los
+  // clientes server-to-server no lo necesitan).
+  CORS_ORIGINS: z
+    .string()
+    .default('')
+    .transform((raw) =>
+      raw
+        .split(',')
+        .map((origin) => origin.trim().replace(/\/+$/, ''))
+        .filter((origin) => origin.length > 0),
+    ),
+
   // ----- Recolector de basura ----------------------------------------------
   WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   WORKER_BATCH_SIZE: z.coerce.number().int().positive().default(50),
@@ -66,6 +98,11 @@ const schema = z.object({
   GC_GRACE_SEC: z.coerce.number().int().positive().default(900),
   // Un temporal mas viejo que esto quedo de una subida que murio a mitad.
   TMP_MAX_AGE_SEC: z.coerce.number().int().positive().default(3_600),
+  // Cada cuanto reconciliar el DISCO contra storage.blobs para borrar archivos
+  // huerfanos (bytes cuya transaccion hizo rollback despues del persist, o
+  // procesos muertos entre el rename y el COMMIT). Recorre el arbol entero:
+  // por eso corre cada horas, no cada ciclo. 0 = deshabilitado.
+  ORPHAN_SWEEP_INTERVAL_SEC: z.coerce.number().int().min(0).default(21_600),
 });
 
 const parsed = schema.safeParse(process.env);

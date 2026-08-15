@@ -1,10 +1,14 @@
 import multipart from '@fastify/multipart';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
+import { verifyPlatformAccessToken } from '../auth/access-token.js';
 import { resolvePrincipal } from '../auth/api-key.js';
 import { config } from '../config/index.js';
+import { pool } from '../db/pool.js';
 import { logger } from '../logger.js';
 import type { Principal } from '../types.js';
+import { registerCors } from './cors.js';
 import { toHttpError } from './errors.js';
+import { registerRateLimit } from './rate-limit.js';
 import { bucketRoutes } from './routes/buckets.js';
 import { fileRoutes } from './routes/files.js';
 import { publicRoutes } from './routes/public.js';
@@ -29,6 +33,9 @@ export function buildServer(): FastifyInstance {
     // Cast al tipo base: pasar la instancia concreta de pino haria que Fastify
     // infiera un logger custom y el tipo de retorno FastifyInstance no cerraria.
     loggerInstance: logger as FastifyBaseLogger,
+    // Detras de un proxy, req.ip sale de X-Forwarded-For (rate limit por
+    // cliente real). Expuesto directo debe ser false: el header es forjable.
+    trustProxy: config.TRUST_PROXY,
     // Techo del body JSON. base64 infla 4/3, mas el resto de los campos: si
     // fuera igual a MAX_UPLOAD_BYTES, un archivo del tamaño maximo se
     // rechazaria por body y no por su propio limite, con el error equivocado.
@@ -45,22 +52,70 @@ export function buildServer(): FastifyInstance {
       // Un archivo por peticion: subir varios de una es otra operacion, con
       // otro contrato de respuesta.
       files: 1,
+      // Sin estos topes, busboy admite campos de texto ILIMITADOS (el
+      // bodyLimit no aplica a multipart): una peticion con millones de partes
+      // creceria en memoria sin techo. 32 campos sobra para el contrato
+      // actual (4 campos + margen); 1 MiB por campo cubre un metadata grande.
+      fields: 32,
+      fieldSize: 1024 * 1024,
     },
   });
 
-  // Auth por api-key para todo lo que no sea health ni descarga firmada.
+  // El preflight CORS se contesta en este hook; debe ir ANTES del de auth.
+  registerCors(app);
+  // Despues del CORS (el preflight no cuenta) y antes de auth: una IP abusiva
+  // se corta sin pagar el lookup de credenciales.
+  registerRateLimit(app);
+
+  // Auth para todo lo que no sea health ni descarga firmada. Dos vias:
+  //   X-Api-Key             -> server-to-server (backend de una app, jobs).
+  //   Authorization: Bearer -> access token de auth_ws (usuario final),
+  //                            validado LOCALMENTE contra el JWKS. Solo si
+  //                            AUTH_WS_BASE_URL esta configurada.
+  // Si vienen las dos, manda la API key: es el canal de mayor confianza y el
+  // contrato previo de los clientes existentes no cambia.
   app.addHook('onRequest', async (req, reply) => {
+    if (req.method === 'OPTIONS') return; // preflight: lo resuelve el CORS
     const path = req.url.split('?')[0] ?? req.url;
     if (PUBLIC_PATHS.has(path) || path.startsWith(PUBLIC_PREFIX)) return;
 
     const key = req.headers['x-api-key'];
-    const principal = resolvePrincipal(Array.isArray(key) ? key[0] : key);
-    if (!principal) {
-      return reply
-        .code(401)
-        .send({ error: 'unauthorized', message: 'API key ausente o invalida.' });
+    if (key !== undefined) {
+      const principal = await resolvePrincipal(Array.isArray(key) ? key[0] : key);
+      if (!principal) {
+        return reply
+          .code(401)
+          .send({ error: 'unauthorized', message: 'API key invalida.' });
+      }
+      req.principal = principal;
+      return;
     }
-    req.principal = principal;
+
+    const authorization = req.headers.authorization;
+    if (authorization?.startsWith('Bearer ') && config.AUTH_WS_BASE_URL !== undefined) {
+      const token = authorization.slice('Bearer '.length);
+      const claims = await verifyPlatformAccessToken(token);
+      if (!claims) {
+        return reply
+          .code(401)
+          .send({ error: 'unauthorized', message: 'Access token invalido.' });
+      }
+      req.principal = {
+        via: 'access_token',
+        customerId: claims.customerId,
+        appId: claims.appId,
+        appCode: claims.appCode,
+        userId: claims.sub,
+        sessionId: claims.sid,
+        token,
+      };
+      return;
+    }
+
+    return reply.code(401).send({
+      error: 'unauthorized',
+      message: 'Credenciales ausentes: se espera X-Api-Key o Authorization: Bearer.',
+    });
   });
 
   app.setErrorHandler((err: unknown, req, reply) => {
@@ -75,7 +130,15 @@ export function buildServer(): FastifyInstance {
     return toHttpError(reply, err);
   });
 
+  // Liveness: ¿responde el proceso? No toca dependencias a proposito.
   app.get('/health', async () => ({ status: 'ok' }));
+  app.get('/health/live', async () => ({ status: 'ok' }));
+  // Readiness: apto para recibir trafico — exige la base alcanzable. Si falla,
+  // responde 500 y el orquestador saca la instancia del balanceo sin matarla.
+  app.get('/health/ready', async () => {
+    await pool.query('SELECT 1');
+    return { status: 'ok' };
+  });
 
   app.register(fileRoutes);
   app.register(bucketRoutes);

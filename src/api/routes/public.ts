@@ -35,7 +35,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       // llega a hacer ninguna consulta.
       verifySignedLink(params.data.id, query.data.expires, query.data.sig);
 
-      const ref = await getContentRef(pool, params.data.id, null);
+      const ref = await getContentRef(pool, params.data.id, null, null);
 
       return sendContent(
         req,

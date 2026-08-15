@@ -10,7 +10,12 @@
 # =============================================================================
 
 @host = http://localhost:3010
-@apiKey = sk_reemplazar_por_una_key_generada
+# Emitir con: npm run register:apikey -- --name "pruebas" (la key se muestra
+# una sola vez; requiere un bucket/app registrados con register-bucket).
+@apiKey = sk_reemplazar_por_una_key_emitida
+# Access token de auth_ws (via Bearer, requiere AUTH_WS_BASE_URL configurada):
+# obtenerlo con el flujo de login de auth_ws (POST /auth/login -> /auth/sessions).
+@accessToken = pegar_un_access_token_de_auth_ws
 
 
 ### Health — no requiere api key
@@ -142,6 +147,36 @@ GET {{link.response.body.url}}
 ### Borrado logico -> 204
 DELETE {{host}}/v1/files/{{uploadJson.response.body.id}}
 X-Api-Key: {{apiKey}}
+
+
+# =============================================================================
+# Via access token (usuario final) — requiere AUTH_WS_BASE_URL y que la sesion
+# tenga los permisos storage.files.* en el catalogo de su app
+# =============================================================================
+
+### Listar archivos con el Bearer del usuario (permiso storage.files.read)
+GET {{host}}/v1/files?limit=20
+Authorization: Bearer {{accessToken}}
+
+
+### Subir con el Bearer del usuario (permiso storage.files.write)
+POST {{host}}/v1/files
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "filename": "nota-usuario.txt",
+  "path": "usuarios/nota.txt",
+  "content_base64": "SG9sYSBjb24gYWNjZXNzIHRva2VuCg=="
+}
+
+
+### Emitir enlace firmado con el Bearer (permiso storage.files.share)
+POST {{host}}/v1/files/{{uploadJson.response.body.id}}/link
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{ "expires_in_sec": 300 }
 
 
 # =============================================================================

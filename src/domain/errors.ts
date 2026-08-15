@@ -61,6 +61,46 @@ export const QuotaExceeded = (bucketCode: string) =>
     `El bucket "${bucketCode}" no tiene espacio suficiente para este archivo.`,
   );
 
+/**
+ * La sesion del token no tiene el permiso storage.* requerido. Solo aplica a
+ * principals por access token; una API key no pasa por RBAC.
+ */
+export const PermissionDenied = (permission: string) =>
+  new DomainError(
+    403,
+    'forbidden',
+    `La sesion no tiene el permiso requerido ("${permission}").`,
+  );
+
+/**
+ * auth_ws reporto la sesion como invalida (revocada/expirada en BD): tiene mas
+ * autoridad que la firma local del JWT, que puede seguir vigente.
+ */
+export const SessionInvalid = () =>
+  new DomainError(401, 'unauthorized', 'La sesion ya no es valida.');
+
+/**
+ * No se pudo autorizar porque auth_ws no responde y no hay cache utilizable.
+ * Fail-closed a proposito: la indisponibilidad nunca abre acceso.
+ */
+export const AuthUnavailable = () =>
+  new DomainError(
+    503,
+    'auth_unavailable',
+    'No se pudo verificar la autorizacion en este momento. Reintentar.',
+  );
+
+/**
+ * Dos subidas concurrentes a la misma ruta: la otra gano la carrera. El
+ * cliente decide si reintenta (y entonces reemplaza lo que la otra subio).
+ */
+export const PathConflict = (path: string) =>
+  new DomainError(
+    409,
+    'path_conflict',
+    `Otra subida concurrente ocupo la ruta "${path}". Reintentar si corresponde reemplazarla.`,
+  );
+
 export const InvalidSignature = () =>
   new DomainError(
     403,

@@ -44,8 +44,11 @@ Todo por variables de entorno — ver [.env.example](.env.example). Claves:
 | --- | --- |
 | `API_ENABLED` / `WORKER_ENABLED` | Qué arranca este proceso |
 | `DATABASE_URL` | Conexión a PostgreSQL |
-| `API_KEY` | API key **hardcodeada** (una sola, por ahora) |
-| `API_KEY_CUSTOMER_ID` / `API_KEY_APP_ID` | Cliente y app asociados a esa key |
+| `AUTH_WS_BASE_URL` | Base de `auth_ws` (admin_project). Definirla **enciende** la auth por access token (Bearer JWT) |
+| `CORS_ORIGINS` | Lista blanca de orígenes para SPAs que llaman directo con el Bearer |
+| `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_SEC` | Límite de peticiones por IP (en memoria, por proceso) |
+| `TRUST_PROXY` | `true` detrás de un reverse proxy: `req.ip` respeta `X-Forwarded-For` |
+| `ORPHAN_SWEEP_INTERVAL_SEC` | Cada cuánto reconciliar el disco contra `storage.blobs` (huérfanos). 0 = apagado |
 | `SERVICE_USER_ID` | UUID de servicio → `created_by`/`updated_by` de los archivos |
 | `STORAGE_ROOT` | Raíz del árbol de archivos. **Acá vive todo el contenido** |
 | `MAX_UPLOAD_BYTES` | Techo global por archivo (el del bucket puede ser menor) |
@@ -53,15 +56,64 @@ Todo por variables de entorno — ver [.env.example](.env.example). Claves:
 | `PUBLIC_BASE_URL` | Origen con el que se arman los enlaces (el externo) |
 | `GC_GRACE_SEC` | Cuánto espera el recolector antes de borrar contenido sin referencias |
 
-> **Auth**: por ahora una única API key en config. No hay tabla de keys en la
-> base todavía; cuando exista `storage.api_keys`, se reemplaza sólo
-> `src/auth/api-key.ts` sin tocar el resto.
+## Autenticación — dos vías
+
+Toda ruta (salvo `/health*` y la descarga firmada `/v1/public/...`, donde la
+firma **es** la autorización) exige una de estas credenciales; el
+`customer_id`/`app_id` salen SIEMPRE de la credencial, nunca del body:
+
+**1. `X-Api-Key` — server-to-server.** El backend de una app o un job llama con
+una API key emitida para su par (cliente, app) en `storage.api_keys`. Hereda
+ese (customer, app) y **no pasa por RBAC**: es un canal confiable, el patrón
+microservicio de la plataforma (igual que smtp-service). En la base vive sólo
+el **SHA-256** de la key; el claro se muestra una única vez al emitirla:
+
+```bash
+npm run register:apikey -- --name "backend ERP" --customer <uuid> --app <uuid>
+```
+
+Revocar: `npm run register:apikey -- --revoke sk_ab12cd34` (por prefijo), o
+soft delete de la fila. Ya **no existe** `API_KEY` en el entorno del servicio.
+
+**2. `Authorization: Bearer <accessToken>` — usuario final.** El mismo access
+token que `auth_ws` (admin_project) le emitió al usuario en el login le sirve
+al frontend para llamar a storage directo. Requiere `AUTH_WS_BASE_URL`:
+
+- La **firma** (Ed25519) se valida **localmente** contra el JWKS de auth_ws
+  (`/auth/.well-known/keys`, caché de horas): storage nunca puede emitir
+  tokens y auth_ws caído no tumba la autenticación.
+- La **autorización** consulta los permisos efectivos de la sesión
+  (`GET /auth/sessions/current/permissions`, caché 60 s por sesión, gracia de
+  5 min si auth_ws no responde; después **fail-closed** con 503). Una sesión
+  revocada pierde acceso aunque su JWT siga vigente.
+- La **atribución** es real: `created_by`/`deleted_by` y
+  `audit.event_log.app_user_id`/`app_session_id` registran al usuario y la
+  sesión del token, no al usuario de servicio.
+
+**Aislamiento por app (las dos vías).** La app del llamador —de la key o del
+claim del token— sólo ve buckets que puede usar: el **default activo del
+cliente** o los **vinculados a ella** en `storage.bucket_apps`. Aplica a
+listar, leer, descargar, firmar enlaces y borrar; un archivo de un bucket
+ajeno responde 404 (no se confirma su existencia). Los enlaces firmados de
+`/v1/public/...` no cambian: la firma es la autorización.
+
+Permisos que cada app registra en su catálogo (`auth.permissions`, por app —
+seed listo en `admin_project/db/99_patch_storage_permissions.sql`, editar la
+lista de apps al tope y ejecutarlo contra la base de admin):
+
+| Permiso | Operaciones |
+| --- | --- |
+| `storage.files.read` | listar buckets/archivos, metadata, descargar |
+| `storage.files.write` | subir (incluye reemplazar una ruta ocupada) |
+| `storage.files.delete` | borrado lógico |
+| `storage.files.share` | emitir enlaces firmados de descarga |
+
+Flujo típico de una app cliente (SPA): login contra auth_ws → guarda el
+`accessToken` → `POST /v1/files` con `Authorization: Bearer …` → para mostrar
+un archivo, `POST /v1/files/:id/link` y usa la URL firmada resultante en el
+`<img>`/`<a>`. Al expirar el token, lo refresca contra auth_ws como siempre.
 
 ## API
-
-Todas las rutas exigen el header `X-Api-Key: <API_KEY>`, salvo `/health` y la
-descarga por enlace firmado (`/v1/public/...`), donde la firma **es** la
-autorización. El `customer_id`/`app_id` salen de la key, nunca del body.
 
 ### `POST /v1/files` — subir
 

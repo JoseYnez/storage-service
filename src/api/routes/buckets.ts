@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { requirePermission, STORAGE_PERMISSIONS } from '../../auth/authorize.js';
 import { pool } from '../../db/pool.js';
 import { listBuckets } from '../../domain/buckets.js';
 import { principalOf } from '../principal.js';
@@ -11,8 +12,9 @@ import { principalOf } from '../principal.js';
  */
 export async function bucketRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/buckets', async (req: FastifyRequest, reply: FastifyReply) => {
-    const { customerId } = principalOf(req);
-    const buckets = await listBuckets(pool, customerId);
+    await requirePermission(req, STORAGE_PERMISSIONS.read);
+    const { customerId, appId } = principalOf(req);
+    const buckets = await listBuckets(pool, customerId, appId);
 
     return reply.send({
       buckets: buckets.map((bucket) => ({

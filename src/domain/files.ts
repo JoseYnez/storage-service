@@ -26,10 +26,34 @@ const FROM_JOIN = `
     ON b.id = f.bucket_id
    AND b.customer_id = f.customer_id`;
 
-/** Metadata de un archivo por id, acotado al cliente de la API key. */
+/**
+ * AISLAMIENTO POR APP: la app del llamador solo ve archivos de buckets que
+ * puede usar — el default activo del cliente, o uno vinculado a ella en
+ * bucket_apps. El parametro es el app_id del principal (de la API key o del
+ * claim del token). Un archivo de un bucket ajeno responde 404, no 403: no se
+ * confirma su existencia a quien no puede verlo.
+ *
+ * El placeholder $N se interpola con el indice del parametro porque cada
+ * consulta lo recibe en una posicion distinta.
+ */
+const bucketAccessPredicate = (appIdParam: number): string => `
+        AND (
+              (b.is_default AND b.status = 'active')
+           OR EXISTS (
+                SELECT 1
+                  FROM storage.bucket_apps ba
+                 WHERE ba.bucket_id = f.bucket_id
+                   AND ba.customer_id = f.customer_id
+                   AND ba.app_id = $${appIdParam}
+                   AND ba.status = 'active'
+              )
+        )`;
+
+/** Metadata de un archivo por id, acotado al cliente Y a la app del llamador. */
 export async function getFileById(
   db: Queryable,
   customerId: string,
+  appId: string,
   id: string,
 ): Promise<FileMetadata> {
   const { rows } = await db.query<FileRow>(
@@ -37,8 +61,9 @@ export async function getFileById(
      ${FROM_JOIN}
       WHERE f.id = $1
         AND f.customer_id = $2
-        AND f.status <> 'deleted'`,
-    [id, customerId],
+        AND f.status <> 'deleted'
+        ${bucketAccessPredicate(3)}`,
+    [id, customerId, appId],
   );
   const row = rows[0];
   if (!row) throw FileNotFound();
@@ -48,6 +73,9 @@ export async function getFileById(
 /**
  * Metadata por la ruta con la que la app lo guardo — sirve para volver a pedir
  * un archivo sin haber guardado el id. Solo filas vigentes.
+ *
+ * Sin predicado de app: bucketId viene de resolveBucket, que YA verifico que
+ * la app del llamador puede usar ese bucket. Igual que listFiles.
  */
 export async function getFileByPath(
   db: Queryable,
@@ -140,14 +168,17 @@ interface ContentRow {
  * Todo lo necesario para servir el contenido: metadata de cabeceras + donde
  * estan los bytes.
  *
- * customerId null = la autorizacion ya la dio la firma del enlace, que ata la
- * URL a ESTE id concreto. Filtrar ademas por cliente no agregaria nada: quien
- * tiene una firma valida para el id ya puede leerlo.
+ * customerId/appId null = la autorizacion ya la dio la firma del enlace, que
+ * ata la URL a ESTE id concreto. Filtrar ademas por cliente o app no agregaria
+ * nada: quien tiene una firma valida para el id ya puede leerlo. Con
+ * credenciales (API key o token), ambos filtros aplican — el de app con el
+ * mismo predicado de acceso a bucket que el resto de las lecturas.
  */
 export async function getContentRef(
   db: Queryable,
   id: string,
   customerId: string | null,
+  appId: string | null,
 ): Promise<FileContentRef> {
   const { rows } = await db.query<ContentRow>(
     `SELECT f.id, f.filename, f.content_type, f.size_bytes, f.sha256,
@@ -156,10 +187,24 @@ export async function getContentRef(
        JOIN storage.blobs bl
          ON bl.id = f.blob_id
         AND bl.customer_id = f.customer_id
+       JOIN storage.buckets b
+         ON b.id = f.bucket_id
+        AND b.customer_id = f.customer_id
       WHERE f.id = $1
         AND ($2::uuid IS NULL OR f.customer_id = $2)
+        AND ($3::uuid IS NULL OR (
+              (b.is_default AND b.status = 'active')
+           OR EXISTS (
+                SELECT 1
+                  FROM storage.bucket_apps ba
+                 WHERE ba.bucket_id = f.bucket_id
+                   AND ba.customer_id = f.customer_id
+                   AND ba.app_id = $3
+                   AND ba.status = 'active'
+              )
+        ))
         AND f.status <> 'deleted'`,
-    [id, customerId],
+    [id, customerId, appId],
   );
   const row = rows[0];
   if (!row) throw FileNotFound();
@@ -183,16 +228,37 @@ export async function getContentRef(
 export async function softDeleteFile(
   client: PoolClient,
   customerId: string,
+  appId: string,
   id: string,
 ): Promise<void> {
+  // Mismo aislamiento por app que las lecturas (el predicado se escribe
+  // inline porque un UPDATE no tiene el JOIN del SELECT comun).
   const { rows } = await client.query<{ blob_id: string }>(
-    `UPDATE storage.files
+    `UPDATE storage.files AS f
         SET status = 'deleted'
-      WHERE id = $1
-        AND customer_id = $2
-        AND status <> 'deleted'
+      WHERE f.id = $1
+        AND f.customer_id = $2
+        AND f.status <> 'deleted'
+        AND (
+              EXISTS (
+                SELECT 1
+                  FROM storage.buckets b
+                 WHERE b.id = f.bucket_id
+                   AND b.customer_id = f.customer_id
+                   AND b.is_default
+                   AND b.status = 'active'
+              )
+           OR EXISTS (
+                SELECT 1
+                  FROM storage.bucket_apps ba
+                 WHERE ba.bucket_id = f.bucket_id
+                   AND ba.customer_id = f.customer_id
+                   AND ba.app_id = $3
+                   AND ba.status = 'active'
+              )
+        )
       RETURNING blob_id`,
-    [id, customerId],
+    [id, customerId, appId],
   );
   const row = rows[0];
   // Borrar dos veces no es un error de negocio distinto de borrar algo que no

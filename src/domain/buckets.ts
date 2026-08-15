@@ -23,10 +23,14 @@ const SELECT_COLUMNS = `
  * Resuelve el bucket donde guardar, en el ORDEN CANONICO del header de
  * 05_storage_bucket_apps.sql:
  *
- *   1. La subida nombra el bucket por code       -> ese
+ *   1. La subida nombra el bucket por code       -> ese, SI la app puede usarlo
  *   2. Vinculo default de la app (bucket_apps)   -> ese
  *   3. Fallback del cliente (buckets.is_default) -> ese
  *   4. Nada                                      -> error, no se adivina
+ *
+ * ACCESO POR APP: un bucket es usable por la app si es el default activo del
+ * cliente o si tiene vinculo activo en bucket_apps. El paso 1 lo verifica
+ * explicitamente; los pasos 2 y 3 lo cumplen por construccion.
  *
  * Resolver es elegir DONDE, no obtener permiso para todo: los limites del
  * bucket elegido se verifican igual (ver assertUploadAllowed).
@@ -37,15 +41,29 @@ export async function resolveBucket(
   appId: string,
   bucketCode: string | null,
 ): Promise<ResolvedBucket> {
-  // 1. Por code explicito.
+  // 1. Por code explicito — solo si la app del llamador puede usarlo: el
+  //    default del cliente esta abierto a todas sus apps; cualquier otro
+  //    bucket exige vinculo activo en bucket_apps. Un bucket ajeno responde
+  //    igual que uno inexistente: no se confirma su existencia.
   if (bucketCode) {
     const { rows } = await client.query<BucketRow>(
-      `SELECT ${SELECT_COLUMNS}
-         FROM storage.buckets
-        WHERE customer_id = $1
-          AND code = $2
-          AND status = 'active'`,
-      [customerId, bucketCode],
+      `SELECT ${prefixed('b')}
+         FROM storage.buckets b
+        WHERE b.customer_id = $1
+          AND b.code = $2
+          AND b.status = 'active'
+          AND (
+                b.is_default
+             OR EXISTS (
+                  SELECT 1
+                    FROM storage.bucket_apps ba
+                   WHERE ba.bucket_id = b.id
+                     AND ba.customer_id = b.customer_id
+                     AND ba.app_id = $3
+                     AND ba.status = 'active'
+                )
+          )`,
+      [customerId, bucketCode, appId],
     );
     const row = rows[0];
     if (!row) throw BucketNotFound(bucketCode);
@@ -86,18 +104,34 @@ export async function resolveBucket(
   throw BucketNotResolved();
 }
 
-/** Lista los buckets vigentes del cliente — el GET /v1/buckets de la API. */
+/**
+ * Lista los buckets vigentes que la APP del llamador puede usar — el
+ * GET /v1/buckets de la API. Mismo criterio de acceso que resolveBucket:
+ * el default del cliente mas los vinculados en bucket_apps.
+ */
 export async function listBuckets(
   db: Queryable,
   customerId: string,
+  appId: string,
 ): Promise<(ResolvedBucket & { name: string; isDefault: boolean })[]> {
   const { rows } = await db.query<BucketRow & { name: string; is_default: boolean }>(
-    `SELECT ${SELECT_COLUMNS}, name, is_default
-       FROM storage.buckets
-      WHERE customer_id = $1
-        AND status = 'active'
-      ORDER BY code`,
-    [customerId],
+    `SELECT ${prefixed('b')}, b.name, b.is_default
+       FROM storage.buckets b
+      WHERE b.customer_id = $1
+        AND b.status = 'active'
+        AND (
+              b.is_default
+           OR EXISTS (
+                SELECT 1
+                  FROM storage.bucket_apps ba
+                 WHERE ba.bucket_id = b.id
+                   AND ba.customer_id = b.customer_id
+                   AND ba.app_id = $2
+                   AND ba.status = 'active'
+              )
+        )
+      ORDER BY b.code`,
+    [customerId, appId],
   );
   return rows.map((row) => ({
     ...toResolved(row),
@@ -138,6 +172,17 @@ export async function assertUploadAllowed(
 
   // 3. Cuota. Solo si el bucket tiene una: sin cuota no hay nada que sumar.
   if (bucket.quotaBytes !== null) {
+    // La suma y el INSERT posterior no son atomicos: dos subidas concurrentes
+    // leerian la misma suma y las dos pasarian, excediendo la cuota (TOCTOU).
+    // Este lock transaction-scoped serializa las subidas del bucket SOLO
+    // cuando hay cuota que defender; se libera en COMMIT/ROLLBACK. El costo es
+    // acotado: dentro de la transaccion solo quedan queries y un rename().
+    await client.query(
+      `SELECT pg_advisory_xact_lock(
+                hashtextextended('storage.buckets.quota:' || $1::text, 0)
+              )`,
+      [bucket.id],
+    );
     const { rows } = await client.query<{ used: string }>(
       `SELECT COALESCE(sum(size_bytes), 0)::text AS used
          FROM storage.files

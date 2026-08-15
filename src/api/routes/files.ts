@@ -1,10 +1,11 @@
 import type { MultipartFile } from '@fastify/multipart';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { requirePermission, STORAGE_PERMISSIONS } from '../../auth/authorize.js';
 import { config } from '../../config/index.js';
 import { withAuditContext } from '../../db/audit-context.js';
 import { pool } from '../../db/pool.js';
 import { resolveBucket } from '../../domain/buckets.js';
-import { FileTooLarge } from '../../domain/errors.js';
+import { FileTooLarge, PathConflict } from '../../domain/errors.js';
 import {
   getContentRef,
   getFileById,
@@ -22,7 +23,7 @@ import { storageProvider } from '../../storage/local.js';
 import { ContentTooLargeError } from '../../storage/provider.js';
 import type { FileMetadata, StagedContent } from '../../types.js';
 import { sendZodError } from '../errors.js';
-import { principalOf } from '../principal.js';
+import { actorOf, principalOf } from '../principal.js';
 import {
   downloadQuerySchema,
   idParamSchema,
@@ -45,12 +46,16 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
   // Son la misma operacion con distinta envoltura; separarlas en dos rutas
   // obligaria a los clientes a elegir una URL segun el tamaño del archivo.
   app.post('/v1/files', async (req: FastifyRequest, reply: FastifyReply) => {
-    const { customerId, appId } = principalOf(req);
+    const principal = principalOf(req);
+    await requirePermission(req, STORAGE_PERMISSIONS.write);
+    const { customerId, appId } = principal;
 
     // El temporal se registra apenas existe: pase lo que pase mas abajo, el
     // finally sabe que hay algo que limpiar.
     let staged: StagedContent | null = null;
     let committed = false;
+    // Ruta ya normalizada, visible para el catch (mensaje del 409).
+    let uploadPath: string | null = null;
 
     try {
       let content: StagedContent;
@@ -101,18 +106,22 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const filename = normalizeFilename(rawFilename);
+      uploadPath = normalizePath(rawPath, filename);
+      const path = uploadPath;
 
-      const result = await withAuditContext({ action: 'POST /v1/files' }, (client) =>
-        commitUpload(client, storageProvider, {
-          customerId,
-          appId,
-          bucketCode,
-          path: normalizePath(rawPath, filename),
-          filename,
-          contentType: normalizeContentType(declaredType, filename),
-          metadata,
-          staged: content,
-        }),
+      const result = await withAuditContext(
+        { action: 'POST /v1/files', ...actorOf(principal) },
+        (client) =>
+          commitUpload(client, storageProvider, {
+            customerId,
+            appId,
+            bucketCode,
+            path,
+            filename,
+            contentType: normalizeContentType(declaredType, filename),
+            metadata,
+            staged: content,
+          }),
       );
 
       // commitUpload ya movio o descarto el temporal.
@@ -122,6 +131,10 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       // El limite se detecta en el borde del stream, donde todavia no hay
       // dominio; aca se traduce al error de dominio que la API sabe mapear.
       if (err instanceof ContentTooLargeError) throw FileTooLarge(err.maxBytes);
+      // Carrera de dos subidas a la misma ruta: el lock advisory de
+      // commitUpload la serializa, pero si igual llegara la unique violation
+      // (p. ej. lock timeout ajeno), es un conflicto del cliente, no un 500.
+      if (isUniquePathViolation(err)) throw PathConflict(uploadPath ?? 'solicitada');
       throw err;
     } finally {
       if (staged && !committed) await storageProvider.discard(staged);
@@ -135,6 +148,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const parsed = listFilesQuerySchema.safeParse(req.query);
     if (!parsed.success) return sendZodError(reply, parsed.error);
 
+    await requirePermission(req, STORAGE_PERMISSIONS.read);
     const { customerId, appId } = principalOf(req);
     const query = parsed.data;
 
@@ -173,8 +187,9 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const parsed = idParamSchema.safeParse(req.params);
     if (!parsed.success) return sendZodError(reply, parsed.error);
 
-    const { customerId } = principalOf(req);
-    const file = await getFileById(pool, customerId, parsed.data.id);
+    await requirePermission(req, STORAGE_PERMISSIONS.read);
+    const { customerId, appId } = principalOf(req);
+    const file = await getFileById(pool, customerId, appId, parsed.data.id);
     return reply.send(toFileResponse(file));
   });
 
@@ -187,8 +202,9 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const query = downloadQuerySchema.safeParse(req.query);
     if (!query.success) return sendZodError(reply, query.error);
 
-    const { customerId } = principalOf(req);
-    const ref = await getContentRef(pool, params.data.id, customerId);
+    await requirePermission(req, STORAGE_PERMISSIONS.read);
+    const { customerId, appId } = principalOf(req);
+    const ref = await getContentRef(pool, params.data.id, customerId, appId);
 
     return sendContent(
       req,
@@ -208,11 +224,15 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const body = linkBodySchema.safeParse(req.body ?? {});
     if (!body.success) return sendZodError(reply, body.error);
 
-    const { customerId } = principalOf(req);
-    // Se comprueba que el archivo exista Y sea de este cliente ANTES de firmar:
-    // la firma no valida nada por si sola, solo prueba que este servicio la
-    // emitio. Emitirla para un id ajeno seria regalar acceso.
-    const file = await getFileById(pool, customerId, params.data.id);
+    // Emitir un enlace es delegar la lectura a un portador anonimo: permiso
+    // propio, separado de read.
+    await requirePermission(req, STORAGE_PERMISSIONS.share);
+    const { customerId, appId } = principalOf(req);
+    // Se comprueba que el archivo exista Y sea de este cliente y de un bucket
+    // accesible a esta app ANTES de firmar: la firma no valida nada por si
+    // sola, solo prueba que este servicio la emitio. Emitirla para un id ajeno
+    // seria regalar acceso.
+    const file = await getFileById(pool, customerId, appId, params.data.id);
 
     const link = issueSignedLink(
       file.id,
@@ -233,15 +253,29 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const parsed = idParamSchema.safeParse(req.params);
     if (!parsed.success) return sendZodError(reply, parsed.error);
 
-    const { customerId } = principalOf(req);
-    await withAuditContext({ action: 'DELETE /v1/files/:id' }, (client) =>
-      softDeleteFile(client, customerId, parsed.data.id),
+    const principal = principalOf(req);
+    await requirePermission(req, STORAGE_PERMISSIONS.delete);
+    await withAuditContext(
+      { action: 'DELETE /v1/files/:id', ...actorOf(principal) },
+      (client) =>
+        softDeleteFile(client, principal.customerId, principal.appId, parsed.data.id),
     );
 
     // 204: el contenido se lo lleva el recolector despues, no hay nada que
     // contarle al cliente.
     return reply.code(204).send();
   });
+}
+
+/**
+ * Unique violation sobre uq_files_bucket_id_path: dos subidas concurrentes a
+ * la misma ruta. Se identifica por codigo SQLSTATE + constraint para no
+ * confundirla con otra unique (p. ej. la de dedup de blobs).
+ */
+function isUniquePathViolation(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const pgErr = err as { code?: unknown; constraint?: unknown };
+  return pgErr.code === '23505' && pgErr.constraint === 'uq_files_bucket_id_path';
 }
 
 interface MultipartRead {

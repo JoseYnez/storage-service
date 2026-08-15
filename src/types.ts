@@ -1,11 +1,39 @@
 /** Backend fisico del contenido — espejo de storage.storage_backend. */
 export type StorageBackend = 'local';
 
-/** Identidad resuelta desde la API key. */
-export interface Principal {
-  customerId: string;
-  appId: string;
-}
+/**
+ * Identidad de la peticion, resuelta por el hook de auth de server.ts.
+ *
+ * Dos vias, con niveles de confianza distintos:
+ *
+ *   api_key       servicio confiable (backend de una app, jobs). Hereda el
+ *                 (customer, app) de la key y NO pasa por RBAC: es el patron
+ *                 server-to-server de la plataforma (mismo que smtp-service).
+ *   access_token  usuario final via JWT de auth_ws (firmado Ed25519, validado
+ *                 localmente contra el JWKS). Trae la identidad real del
+ *                 usuario y su sesion; cada operacion exige ademas el permiso
+ *                 storage.* correspondiente sobre su tripleta (ver
+ *                 auth/authorize.ts).
+ */
+export type Principal =
+  | {
+      via: 'api_key';
+      customerId: string;
+      appId: string;
+    }
+  | {
+      via: 'access_token';
+      customerId: string;
+      appId: string;
+      /** core.apps.code de la app del token (lo etiqueta el JWKS). */
+      appCode: string;
+      /** auth.users.id (claim sub) — atribucion real en auditoria. */
+      userId: string;
+      /** auth.app_customer_user_sessions.id (claim sid). */
+      sessionId: string;
+      /** Bearer crudo: hace falta para consultar los permisos de la sesion. */
+      token: string;
+    };
 
 /** Bucket resuelto para una subida, con sus limites ya cargados. */
 export interface ResolvedBucket {
