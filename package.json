@@ -1,0 +1,33 @@
+{
+  "name": "storage-service",
+  "version": "0.1.0",
+  "description": "Servicio de almacenamiento de archivos en disco local expuesto por API HTTP",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "gen:apikey": "node --input-type=module -e \"import{randomBytes}from'node:crypto';console.log('sk_'+randomBytes(24).toString('base64url'))\"",
+    "gen:signkey": "node --input-type=module -e \"import{randomBytes}from'node:crypto';console.log(randomBytes(32).toString('base64'))\"",
+    "register:bucket": "node scripts/register-bucket.mjs"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^9.0.1",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.2.0",
+    "pg": "^8.12.0",
+    "pino": "^9.3.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4"
+  }
+}

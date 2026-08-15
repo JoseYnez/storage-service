@@ -1,0 +1,5 @@
+# pnpm 10+/11 movio los settings de package.json aca. esbuild necesita su build
+# script (binario nativo) para que `tsx` (npm run dev) funcione; se habilita
+# explicitamente en vez de dejarlo en cuarentena anti-supply-chain.
+allowBuilds:
+  esbuild: true
