@@ -1,5 +1,5 @@
 import type { Readable } from 'node:stream';
-import type { StagedContent, StorageBackend } from '../types.js';
+import type { ByteRange, StagedContent, StorageBackend } from '../types.js';
 
 /**
  * Contrato del almacenamiento fisico. El dominio nunca toca el filesystem
@@ -44,7 +44,8 @@ export interface StorageProvider {
   exists(storageKey: string): Promise<boolean>;
 
   /**
-   * Abre el contenido para leerlo. Lanza ContentMissingError si no esta.
+   * Abre el contenido para leerlo, entero o por tramo. Lanza
+   * ContentMissingError si no esta.
    *
    * Es async y resuelve la existencia POR SI MISMA a proposito. La alternativa
    * —preguntar con exists() y despues leer— cuesta un stat de mas en el
@@ -56,8 +57,16 @@ export interface StorageProvider {
    * cabeceras: una vez enviadas, un fallo a mitad del stream ya no se puede
    * convertir en un 410. Por eso el error viaja al abrir y no durante la
    * lectura.
+   *
+   * El tramo se pasa AL BACKEND, no se recorta despues de leer: leer 900 MB
+   * para devolver 2 no seria reanudar nada. En el proveedor local son los
+   * parametros de createReadStream; en uno remoto, la cabecera Range de su
+   * propio GET — que es exactamente como S3 sirve rangos.
+   *
+   * `range` viene ya validado contra el tamaño real (ver api/range.ts): el
+   * proveedor no tiene que defenderse de tramos fuera de limite.
    */
-  open(storageKey: string): Promise<Readable>;
+  open(storageKey: string, range?: ByteRange): Promise<Readable>;
 
   /** Borra contenido. No falla si ya no estaba. */
   remove(storageKey: string): Promise<void>;

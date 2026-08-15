@@ -108,6 +108,24 @@ GET {{host}}/v1/files/{{uploadJson.response.body.id}}/content?download=1
 X-Api-Key: {{apiKey}}
 
 
+### Descargar un tramo -> 206 + Content-Range
+GET {{host}}/v1/files/{{uploadJson.response.body.id}}/content
+X-Api-Key: {{apiKey}}
+Range: bytes=0-9
+
+
+### Los ultimos bytes (sufijo) -> 206
+GET {{host}}/v1/files/{{uploadJson.response.body.id}}/content
+X-Api-Key: {{apiKey}}
+Range: bytes=-5
+
+
+### Tramo fuera del archivo -> 416 + Content-Range: bytes *\/tamaño
+GET {{host}}/v1/files/{{uploadJson.response.body.id}}/content
+X-Api-Key: {{apiKey}}
+Range: bytes=99999999-
+
+
 ### Emitir un enlace temporal firmado (5 min)
 # @name link
 POST {{host}}/v1/files/{{uploadJson.response.body.id}}/link

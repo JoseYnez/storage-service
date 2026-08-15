@@ -16,7 +16,7 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { config } from '../config/index.js';
 import { logger } from '../logger.js';
-import type { StagedContent, StorageBackend } from '../types.js';
+import type { ByteRange, StagedContent, StorageBackend } from '../types.js';
 import {
   ContentMissingError,
   ContentTooLargeError,
@@ -149,7 +149,7 @@ export class LocalStorageProvider implements StorageProvider {
    * ninguna implementacion razonable. Lo que importa del contrato es que un
    * proveedor REMOTO puede resolver esto en un solo GET — ver provider.ts.
    */
-  async open(storageKey: string): Promise<Readable> {
+  async open(storageKey: string, range?: ByteRange): Promise<Readable> {
     const target = this.assertInsideRoot(storageKey);
     try {
       await stat(target);
@@ -159,7 +159,12 @@ export class LocalStorageProvider implements StorageProvider {
       }
       throw err;
     }
-    return createReadStream(target);
+    // start/end de createReadStream son inclusivos los dos, igual que ByteRange
+    // y que el Range de HTTP: no hay que corregir el extremo. Sin tramo se lee
+    // el archivo entero.
+    return range === undefined
+      ? createReadStream(target)
+      : createReadStream(target, { start: range.start, end: range.end });
   }
 
   async remove(storageKey: string): Promise<void> {

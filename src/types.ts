@@ -43,6 +43,16 @@ export interface FileContentRef {
 }
 
 /**
+ * Tramo de bytes a leer, con AMBOS extremos INCLUSIVOS — como el Range de HTTP
+ * y como el {start, end} de createReadStream, que por suerte coinciden. Un
+ * tramo de un solo byte es { start: n, end: n }.
+ */
+export interface ByteRange {
+  start: number;
+  end: number;
+}
+
+/**
  * Contenido ya escrito en el area temporal del proveedor, con su identidad
  * calculada mientras se escribia. Es lo que se le entrega al commit para que lo
  * mueva a su lugar definitivo (o lo descarte, si el contenido ya existia).

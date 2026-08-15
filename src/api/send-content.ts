@@ -2,7 +2,8 @@ import type { Readable } from 'node:stream';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { FileContentGone } from '../domain/errors.js';
 import { ContentMissingError, type StorageProvider } from '../storage/provider.js';
-import type { FileContentRef } from '../types.js';
+import type { ByteRange, FileContentRef } from '../types.js';
+import { resolveRange } from './range.js';
 
 /**
  * Tipos que un navegador EJECUTA si los muestra en linea. Se sirven siempre
@@ -46,6 +47,30 @@ export async function sendContent(
     return reply.code(304).send();
   }
 
+  // El tramo se resuelve sin tocar el backend: es aritmetica sobre el tamaño
+  // que ya trae la fila, asi que un 416 se contesta sin abrir nada.
+  const outcome = resolveRange(
+    req.headers.range,
+    req.headers['if-range'],
+    etag,
+    ref.sizeBytes,
+  );
+
+  if (outcome.kind === 'unsatisfiable') {
+    // Content-Range con '*' es lo que le dice al cliente cual es el tamaño real
+    // para que reintente bien. Sin ETag: un error no es una representacion
+    // cacheable.
+    reply.header('Accept-Ranges', 'bytes');
+    reply.header('Content-Range', `bytes */${ref.sizeBytes}`);
+    return reply.code(416).send({
+      error: 'range_not_satisfiable',
+      message: 'El tramo solicitado esta fuera del archivo.',
+    });
+  }
+
+  const range: ByteRange | undefined =
+    outcome.kind === 'partial' ? outcome.range : undefined;
+
   // Se abre ANTES de escribir NADA en la respuesta: un contenido ausente tiene
   // que poder convertirse en un 410, y con cabeceras ya enviadas no se puede.
   // open() resuelve existencia y lectura de una sola vez — contra un backend
@@ -56,7 +81,7 @@ export async function sendContent(
   // contenido que no existe — algo contra lo que un cliente podria revalidar.
   let content: Readable;
   try {
-    content = await storage.open(ref.storageKey);
+    content = await storage.open(ref.storageKey, range);
   } catch (err) {
     if (err instanceof ContentMissingError) throw FileContentGone();
     throw err;
@@ -67,15 +92,24 @@ export async function sendContent(
     : 'inline';
 
   setCacheHeaders(reply, etag);
+  // Anunciar el soporte de tramos es parte del contrato: un reproductor decide
+  // si puede buscar dentro del video mirando esta cabecera, no probando.
+  reply.header('Accept-Ranges', 'bytes');
   // El navegador no adivina el tipo: se respeta el content_type almacenado.
   reply.header('X-Content-Type-Options', 'nosniff');
   // Segunda linea de defensa sobre NEVER_INLINE: aunque algo se muestre en
   // linea, no puede cargar ni ejecutar nada.
   reply.header('Content-Security-Policy', "default-src 'none'; sandbox");
   reply.header('Content-Type', ref.contentType);
-  reply.header('Content-Length', ref.sizeBytes);
   reply.header('Content-Disposition', contentDisposition(disposition, ref.filename));
 
+  if (range) {
+    reply.header('Content-Range', `bytes ${range.start}-${range.end}/${ref.sizeBytes}`);
+    reply.header('Content-Length', range.end - range.start + 1);
+    return reply.code(206).send(content);
+  }
+
+  reply.header('Content-Length', ref.sizeBytes);
   return reply.send(content);
 }
 

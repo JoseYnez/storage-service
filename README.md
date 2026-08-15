@@ -127,6 +127,28 @@ significa que no hay más.
 Devuelve los bytes con `ETag` (el sha256), `Content-Disposition` y soporte de
 `If-None-Match` (`304`). `?download=1` fuerza descarga en vez de vista en línea.
 
+**Descarga por tramos (`Range`)** — para archivos grandes, vídeo y audio:
+
+```http
+Range: bytes=0-1048575      → 206 + Content-Range: bytes 0-1048575/52428800
+Range: bytes=1048576-       → 206, desde ese byte hasta el final
+Range: bytes=-1024          → 206, los últimos 1024 bytes
+Range: bytes=99999999-      → 416 + Content-Range: bytes */52428800
+```
+
+Toda respuesta anuncia `Accept-Ranges: bytes`. Con esto funcionan la
+**reanudación** de descargas cortadas, el **salto de posición** en un `<video>`
+o `<audio>` (Safari directamente no reproduce sin esto) y los gestores de
+descarga por bloques.
+
+`If-Range` con el ETag hace segura la reanudación: si el contenido cambió, se
+responde `200` con el archivo entero en vez de pegar bytes de dos versiones
+distintas. Un `Range` con varios tramos o mal formado **se ignora** y se
+devuelve el archivo completo, que es lo que manda el RFC.
+
+Los tramos se piden **al backend**, no se recortan después de leer: pedir 1 KB
+de un archivo de 900 MB lee 1 KB.
+
 ### `POST /v1/files/:id/link` — enlace temporal firmado
 
 ```jsonc
@@ -284,8 +306,9 @@ backend deduplica dentro de sí mismo.
 
 ## Límites conocidos
 
-- **Sin `Range`**: las descargas se sirven completas. Reproducir un video largo
-  con salto de posición todavía no funciona.
+- **Un solo tramo por petición**: `bytes=0-9,20-29` se ignora y se devuelve el
+  archivo entero. Responder varios tramos exige `multipart/byteranges`, que
+  ningún reproductor pide.
 - **Cuota por suma**: se calcula sumando los archivos vigentes del bucket en cada
   subida (índice `idx_files_bucket_id` con `INCLUDE`, resuelto por index-only
   scan). Con buckets de muchísimos archivos conviene pasar a un contador
