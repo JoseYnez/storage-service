@@ -1,9 +1,10 @@
 import { hostname } from 'node:os';
 import { config } from '../config/index.js';
 import { withAuditContext } from '../db/audit-context.js';
+import { pool } from '../db/pool.js';
 import { logger } from '../logger.js';
 import { storageProvider } from '../storage/local.js';
-import { collectOrphanBlobs } from './gc.js';
+import { collectOrphanBlobs, sweepOrphanContent } from './gc.js';
 
 const workerId = `${hostname()}:${process.pid}`;
 
@@ -25,6 +26,8 @@ export class Worker {
   private stopped = false;
   private wakeUp: (() => void) | null = null;
   private loopPromise: Promise<void> | null = null;
+  /** Ultimo barrido de huerfanos de disco (epoch ms). 0 = nunca en este proceso. */
+  private lastOrphanSweepMs = 0;
 
   start(): void {
     if (this.loopPromise) return;
@@ -55,6 +58,11 @@ export class Worker {
       } catch (err) {
         logger.error({ err }, 'fallo el ciclo del recolector');
       }
+      // Si stop() llego DURANTE el tick, wakeUp era null y no desperto a
+      // nadie: sin este corte, el bucle entraria igual a dormir el intervalo
+      // completo y el apagado ordenado colgaria hasta 60 s (mas que el margen
+      // SIGTERM->SIGKILL de Docker).
+      if (this.stopped) break;
       const elapsed = Date.now() - started;
       await this.sleep(Math.max(0, config.WORKER_INTERVAL_MS - elapsed));
     }
@@ -85,6 +93,22 @@ export class Worker {
     }
     if (result.repaired > 0) {
       logger.warn({ repaired: result.repaired }, 'contadores de referencias corregidos');
+    }
+
+    // 3. Huerfanos de DISCO (bytes sin fila). Recorre el arbol entero, asi que
+    //    corre cada ORPHAN_SWEEP_INTERVAL_SEC, no cada ciclo. Sin transaccion:
+    //    son SELECTs y unlinks — el margen anti-carrera es la edad del archivo.
+    const sweepIntervalMs = config.ORPHAN_SWEEP_INTERVAL_SEC * 1000;
+    if (sweepIntervalMs > 0 && Date.now() - this.lastOrphanSweepMs >= sweepIntervalMs) {
+      this.lastOrphanSweepMs = Date.now();
+      const orphans = await sweepOrphanContent(
+        pool,
+        storageProvider,
+        config.TMP_MAX_AGE_SEC,
+      );
+      if (orphans > 0) {
+        logger.warn({ orphans }, 'archivos huerfanos (sin fila en blobs) borrados del backend');
+      }
     }
   }
 

@@ -11,7 +11,7 @@ import {
   stat,
   unlink,
 } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { config } from '../config/index.js';
@@ -21,6 +21,7 @@ import {
   ContentMissingError,
   ContentTooLargeError,
   type StorageProvider,
+  type StoredObject,
 } from './provider.js';
 
 /** Subdirectorio de trabajo. El punto lo mantiene fuera de los arboles de cliente. */
@@ -199,6 +200,49 @@ export class LocalStorageProvider implements StorageProvider {
     }
 
     return removed;
+  }
+
+  async *listContent(): AsyncIterable<StoredObject> {
+    yield* this.walk(this.root);
+  }
+
+  /**
+   * Recorrido recursivo bajo la raiz, salteando el area temporal (.tmp, que
+   * barre sweepStaged por edad). Las claves se emiten con '/' — la misma forma
+   * que storage.blobs.storage_key — aunque el filesystem use '\'.
+   * Un archivo que desaparece entre el readdir y el stat no es un error: otro
+   * proceso (el GC de otra instancia) lo borro primero.
+   */
+  private async *walk(dir: string): AsyncGenerator<StoredObject> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw err;
+    }
+
+    for (const entry of entries) {
+      if (dir === this.root && entry.name === TMP_DIR_NAME) continue;
+      const path = join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        yield* this.walk(path);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+
+      try {
+        const info = await stat(path);
+        yield {
+          storageKey: relative(this.root, path).split(sep).join('/'),
+          modifiedAtMs: info.mtimeMs,
+        };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+    }
   }
 
   /**

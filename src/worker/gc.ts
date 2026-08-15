@@ -1,4 +1,4 @@
-import type { PoolClient } from '../db/pool.js';
+import type { PoolClient, Queryable } from '../db/pool.js';
 import { logger } from '../logger.js';
 import type { StorageProvider } from '../storage/provider.js';
 
@@ -103,4 +103,75 @@ export async function collectOrphanBlobs(
   }
 
   return { collected, repaired };
+}
+
+/** Claves por consulta al reconciliar disco contra storage.blobs. */
+const ORPHAN_CHECK_BATCH = 500;
+
+/**
+ * Reconcilia el BACKEND contra storage.blobs y borra el contenido huerfano:
+ * archivos cuya clave no tiene fila vigente (status <> 'deleted').
+ *
+ * De donde sale un huerfano: el persist() de una subida corre DENTRO de la
+ * transaccion, antes del COMMIT. Si despues del rename algo falla (rollback,
+ * caida del proceso), los bytes quedan y la fila no. Y como storage_key
+ * termina en el id del blob, una re-subida del mismo contenido crea OTRA fila
+ * con OTRA ruta: el archivo viejo no se reusa nunca y ningun otro mecanismo
+ * lo conoce. Este barrido es la unica via de salida.
+ *
+ * Salvaguardas contra borrar de mas:
+ *   * minAgeSec: un archivo recien escrito puede ser una subida EN CURSO
+ *     (persist hecho, COMMIT pendiente). Solo se toca lo mas viejo que este
+ *     margen — una transaccion de subida vive segundos, no horas.
+ *   * La consulta mira TODAS las filas no borradas, incluidas las de blobs
+ *     con reference_count 0: de esos se encarga collectOrphanBlobs con su
+ *     propio periodo de gracia, no este barrido.
+ *   * Un archivo cuya fila esta status='deleted' es basura por definicion:
+ *     el GC borra los bytes ANTES de marcar la fila, asi que si el archivo
+ *     sigue ahi es que aquel remove() fallo.
+ */
+export async function sweepOrphanContent(
+  db: Queryable,
+  storage: StorageProvider,
+  minAgeSec: number,
+): Promise<number> {
+  const cutoffMs = Date.now() - minAgeSec * 1000;
+  let removed = 0;
+
+  let batch: { storageKey: string }[] = [];
+
+  const flush = async (): Promise<void> => {
+    if (batch.length === 0) return;
+    const keys = batch.map((o) => o.storageKey);
+    batch = [];
+
+    const { rows } = await db.query<{ storage_key: string }>(
+      `SELECT storage_key
+         FROM storage.blobs
+        WHERE storage_key = ANY($1::text[])
+          AND status <> 'deleted'`,
+      [keys],
+    );
+    const live = new Set(rows.map((r) => r.storage_key));
+
+    for (const key of keys) {
+      if (live.has(key)) continue;
+      try {
+        await storage.remove(key);
+        removed++;
+        logger.warn({ storageKey: key }, 'contenido huerfano borrado del backend');
+      } catch (err) {
+        logger.error({ err, storageKey: key }, 'no se pudo borrar un huerfano');
+      }
+    }
+  };
+
+  for await (const object of storage.listContent()) {
+    if (object.modifiedAtMs >= cutoffMs) continue;
+    batch.push({ storageKey: object.storageKey });
+    if (batch.length >= ORPHAN_CHECK_BATCH) await flush();
+  }
+  await flush();
+
+  return removed;
 }

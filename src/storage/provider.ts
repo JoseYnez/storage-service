@@ -76,6 +76,25 @@ export interface StorageProvider {
    * Devuelve cuantos borro.
    */
   sweepStaged(maxAgeSec: number): Promise<number>;
+
+  /**
+   * Enumera TODO el contenido almacenado (excluye el area temporal), para que
+   * el recolector reconcilie el backend contra storage.blobs y borre huerfanos
+   * — bytes cuya transaccion hizo rollback despues del persist, o procesos
+   * muertos entre el rename y el COMMIT: como storage_key termina en el id del
+   * blob, una re-subida NUNCA reusa esa ruta y el archivo quedaria para
+   * siempre. Es un recorrido completo: se llama cada horas, no cada ciclo.
+   * En un proveedor remoto es el LIST paginado del bucket.
+   */
+  listContent(): AsyncIterable<StoredObject>;
+}
+
+/** Objeto existente en el backend, visto por listContent(). */
+export interface StoredObject {
+  /** Clave relativa, en la misma forma que storage.blobs.storage_key. */
+  storageKey: string;
+  /** Ultima modificacion (epoch ms) — el margen anti-carrera del sweeper. */
+  modifiedAtMs: number;
 }
 
 /** El contenido supera el limite admitido. La API lo traduce a 413. */
