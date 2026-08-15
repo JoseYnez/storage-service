@@ -61,12 +61,13 @@ function required(args, name) {
 
 function positiveIntOrNull(raw, flag) {
   if (raw === undefined) return null;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
+  // Flag sin valor llega como `true`; Number(true) === 1 registraria una cuota
+  // de 1 byte en silencio.
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw) || Number(raw) <= 0) {
     console.error(`--${flag} debe ser un entero positivo (bytes): ${raw}`);
     process.exit(1);
   }
-  return value;
+  return Number(raw);
 }
 
 async function main() {

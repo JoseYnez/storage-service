@@ -71,6 +71,19 @@ export async function commitUpload(
     input.bucketCode,
   );
 
+  // Serializa las subidas concurrentes a la MISMA ruta. Sin esto, dos subidas
+  // simultaneas pasan las dos por releasePathIfTaken sin ver la fila de la
+  // otra (READ COMMITTED) y la segunda muere con unique violation sobre
+  // uq_files_bucket_id_path. El lock es transaction-scoped (se libera solo en
+  // COMMIT/ROLLBACK) y solo choca entre subidas a la misma (bucket, ruta):
+  // resultado, last-writer-wins limpio en vez de un 409 aleatorio.
+  await client.query(
+    `SELECT pg_advisory_xact_lock(
+              hashtextextended('storage.files.path:' || $1::text || '/' || $2, 0)
+            )`,
+    [bucket.id, input.path],
+  );
+
   await assertUploadAllowed(
     client,
     bucket,

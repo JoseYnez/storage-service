@@ -10,7 +10,19 @@ const bucketCode = z.string().trim().min(1).max(255);
 const logicalPath = z.string().trim().min(1).max(1024);
 const filename = z.string().trim().min(1).max(255);
 const contentType = z.string().trim().min(1).max(255);
-const metadata = z.record(z.unknown());
+
+/**
+ * Techo del metadata SERIALIZADO. Sin el, la via JSON admitiria un metadata
+ * de hasta el bodyLimit entero (>100 MB) directo a una columna JSONB. 64 KiB
+ * cubre con margen cualquier correlacion razonable.
+ */
+const MAX_METADATA_JSON_BYTES = 64 * 1024;
+
+const metadata = z
+  .record(z.unknown())
+  .refine((value) => JSON.stringify(value).length <= MAX_METADATA_JSON_BYTES, {
+    message: `metadata supera el maximo de ${MAX_METADATA_JSON_BYTES} bytes serializado`,
+  });
 
 /** Base64 estandar, sin espacios ni saltos: lo que produce Buffer.toString('base64'). */
 const base64 = z
@@ -48,6 +60,13 @@ export const uploadMultipartFieldsSchema = z.object({
   metadata: z
     .string()
     .transform((raw, ctx) => {
+      if (raw.length > MAX_METADATA_JSON_BYTES) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `metadata supera el maximo de ${MAX_METADATA_JSON_BYTES} bytes serializado`,
+        });
+        return z.NEVER;
+      }
       try {
         const parsed: unknown = JSON.parse(raw);
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {

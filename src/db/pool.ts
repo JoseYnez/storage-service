@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { config } from '../config/index.js';
+import { logger } from '../logger.js';
 
 const { Pool } = pg;
 
@@ -16,8 +17,7 @@ export const pool = new Pool({
 pool.on('error', (err) => {
   // Un cliente ocioso del pool murio (p.ej. la DB se reinicio). pg lo descarta
   // solo; solo lo registramos para no matar el proceso.
-  // eslint-disable-next-line no-console
-  console.error('[db] error en cliente ocioso del pool:', err.message);
+  logger.error({ err }, 'error en cliente ocioso del pool de la base');
 });
 
 export type PoolClient = pg.PoolClient;
