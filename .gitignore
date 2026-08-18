@@ -1,8 +1,9 @@
 node_modules/
 dist/
 *.log
-.env
-.env.local
+# Cualquier variante de .env (copias incluidas) salvo la plantilla
+.env*
+!.env.example
 .DS_Store
 # Contenido subido (STORAGE_ROOT por defecto). Nunca va al repo.
 data/
