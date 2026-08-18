@@ -52,7 +52,6 @@ COPY package.json ./
 #   docker run -v storage_data:/data -e STORAGE_ROOT=/data ...
 ENV STORAGE_ROOT=/data
 RUN mkdir -p /data && chown node:node /data
-VOLUME ["/data"]
 
 # El servicio escucha en 0.0.0.0:3010 por defecto (config: PORT).
 EXPOSE 3010
